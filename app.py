@@ -22,7 +22,7 @@ from PIL import Image
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="03A FontCLIP Logo Prescreener", layout="wide")
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 RUNTIME_ROOT = Path.home() / ".cache" / "fontclip_logo_prescreener"
 FONTCLIP_REPO_API = "https://api.github.com/repos/yukistavailable/FontCLIP/commits/main"
 FONTCLIP_ARCHIVE_URL = "https://github.com/yukistavailable/FontCLIP/archive/{sha}.zip"
@@ -517,6 +517,7 @@ if "fontclip_results" in st.session_state:
     else:
         pool = results.copy()
 
+    shortlist = pd.DataFrame(columns=results.columns)
     if len(pool) == 0:
         st.warning("선택한 후보 범위에 해당하는 로고가 없습니다. Eligibility를 먼저 검토하세요.")
     else:
@@ -531,34 +532,95 @@ if "fontclip_results" in st.session_state:
             "최종 표본은 공식 브랜드 텍스트·패키지·웹사이트 확보 가능성을 추가 확인한 뒤 연구자가 확정해야 합니다."
         )
 
-        # Export with selection flag.
-        marked = results.copy()
+    # -------------------------------------------------------------------------
+    # CSV exports: make every analysis output downloadable as an individual CSV
+    # as well as one ZIP archive. Downloads are available even when no shortlist
+    # can be produced for the selected eligibility pool.
+    # -------------------------------------------------------------------------
+    marked = results.copy()
+    if len(shortlist):
         marked["Diversity_Shortlist"] = marked.Brand.isin(shortlist.Brand).astype(int)
+    else:
+        marked["Diversity_Shortlist"] = 0
 
-        meta_df = pd.DataFrame([{
-            "App_Version": APP_VERSION,
-            **R["meta"],
-            "N_Logos": len(results),
-            "N_Shortlist": len(shortlist),
-            "Facet_Aggregation": "Arithmetic mean of Aaker facets within each dimension",
-            "Primary_Metric": "Raw image-text cosine similarity",
-            "Diversity_Method": "5D profile cosine distance + deterministic maximin",
-        }])
+    facet_cols = ["Facet_" + f for f in FACET_NAMES]
+    id_cols = ["Filename", "Brand", "Eligibility", "Researcher_Note"]
+    facet_export = marked[[c for c in id_cols if c in marked.columns] + facet_cols].copy()
 
-        distance_export = R["distance"].reset_index().rename(columns={"Brand": "Brand", "index": "Brand"})
-        files = {
-            "03A_logo_standardization_review.csv": R["review"],
-            "03A_fontclip_logo_profiles.csv": marked,
-            "03A_fontclip_diversity_shortlist.csv": shortlist,
-            "03A_fontclip_pairwise_distance.csv": distance_export,
-            "03A_fontclip_run_metadata.csv": meta_df,
-        }
-        st.download_button(
-            "전체 결과 ZIP 다운로드",
-            data=zip_csv(files),
-            file_name="03A_fontclip_logo_prescreen_results_v1_0.zip",
-            mime="application/zip",
-        )
+    profile_cols = [
+        "Filename", "Brand", "Eligibility", "Researcher_Note",
+        "Primary_Dimension", "Mean_Profile_Distance", "Diversity_Rank",
+        "PCA1", "PCA2", "Diversity_Shortlist",
+    ] + DIMENSIONS
+    profile_export = marked[[c for c in profile_cols if c in marked.columns]].copy()
+
+    prompt_df = pd.DataFrame(
+        [(d, f, PROMPT_TEMPLATE.format(f.lower())) for d, fs in FACETS.items() for f in fs],
+        columns=["Dimension", "Facet", "FontCLIP_Prompt"],
+    )
+
+    meta_df = pd.DataFrame([{
+        "App_Version": APP_VERSION,
+        **R["meta"],
+        "N_Logos": len(results),
+        "N_Shortlist": len(shortlist),
+        "Shortlist_Pool": eligible_option,
+        "Facet_Aggregation": "Arithmetic mean of Aaker facets within each dimension",
+        "Primary_Metric": "Raw image-text cosine similarity",
+        "Diversity_Method": "5D profile cosine distance + deterministic maximin",
+    }])
+
+    # Matrix form is useful for inspection; long form is easier for statistics.
+    distance_matrix = R["distance"].copy()
+    distance_matrix.index.name = "Brand"
+    distance_export = distance_matrix.reset_index()
+    distance_long = (
+        distance_matrix
+        .rename_axis(index="Brand_A", columns="Brand_B")
+        .stack()
+        .rename("Cosine_Distance")
+        .reset_index()
+    )
+
+    files = {
+        "03A_01_logo_standardization_review.csv": R["review"],
+        "03A_02_fontclip_all_analysis_results.csv": marked,
+        "03A_03_fontclip_15facet_scores.csv": facet_export,
+        "03A_04_fontclip_5D_profiles.csv": profile_export,
+        "03A_05_fontclip_pairwise_distance_matrix.csv": distance_export,
+        "03A_06_fontclip_pairwise_distance_long.csv": distance_long,
+        "03A_07_fontclip_diversity_shortlist.csv": shortlist,
+        "03A_08_fontclip_prompt_definition.csv": prompt_df,
+        "03A_09_fontclip_run_metadata.csv": meta_df,
+    }
+
+    st.subheader("6. 모든 분석결과 CSV 다운로드")
+    st.caption(
+        "전체 점수, 15 facet, 5차원 프로파일, pairwise distance, shortlist, prompt 정의, 실행 메타데이터를 "
+        "각각 CSV로 내려받을 수 있습니다."
+    )
+
+    st.download_button(
+        "📦 모든 CSV를 ZIP으로 한 번에 다운로드",
+        data=zip_csv(files),
+        file_name="03A_fontclip_logo_prescreen_all_csv_v1_1.zip",
+        mime="application/zip",
+        type="primary",
+    )
+
+    file_items = list(files.items())
+    for i in range(0, len(file_items), 3):
+        cols = st.columns(3)
+        for col, (name, df) in zip(cols, file_items[i:i+3]):
+            with col:
+                st.download_button(
+                    name.replace(".csv", ""),
+                    data=df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=name,
+                    mime="text/csv",
+                    key=f"download_{name}",
+                    use_container_width=True,
+                )
 
     with st.expander("실행 재현정보"):
         st.json(R["meta"])
